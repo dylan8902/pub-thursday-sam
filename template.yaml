@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: pub-thursday-sam
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  Domain:
+    Type: String
+    Default: aws.dylanjones.info
+  Subdomain:
+    Type: String
+    Default: pub-thursday-ifttt
+
+Globals:
+  Function:
+    Tracing: Active
+    Runtime: nodejs18.x
+    Architectures:
+      - arm64
+    MemorySize: 128
+    Timeout: 100
+
+Resources:
+  #  connector:
+  #    Type: AWS::Serverless::Connector
+  #    Properties:
+  #      Source:
+  #        Id: checkInFunction
+  #      Destination:
+  #        Arn: !Sub arn:aws:geo:${AWS::Region}:${AWS::AccountId}:place-index/explore.place
+  #        Type: AWS::Location::PlaceIndex
+  #      Permissions:
+  #        - Read
+
+  dns:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref Domain
+
+  cert:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub "${Subdomain}.${Domain}"
+      DomainValidationOptions:
+        - DomainName: !Sub "${Subdomain}.${Domain}"
+          HostedZoneId: !Ref dns
+      ValidationMethod: DNS
+
+  api:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Cors: "'*'"
+      Description: Pub Thursday IFTTT
+      TracingEnabled: True
+      OpenApiVersion: "3.0.2"
+      DisableExecuteApiEndpoint: true
+      Domain:
+        CertificateArn: !Ref cert
+        DomainName: !Sub "${Subdomain}.${Domain}"
+        Route53:
+            HostedZoneId: !Ref dns
+            EvaluateTargetHealth: true
+
+  testSetupFunctionLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/test-setup
+      RetentionInDays: 7
+
+  testSetupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: test-setup
+      Handler: build/main.testSetupHandler
+      Description: A test
+      Events:
+        TestSetupEvent:
+          Type: Api
+          Properties:
+            Path: /ifttt/v1/test/setup
+            Method: POST
+            RestApiId: !Ref api
+    DependsOn: testSetupFunctionLog
+
+  statusFunctionLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/status
+      RetentionInDays: 7
+
+  statusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: status
+      Handler: build/main.statusHandler
+      Description: Status
+      Events:
+        StatusEvent:
+          Type: Api
+          Properties:
+            Path: /ifttt/v1/status
+            Method: GET
+            RestApiId: !Ref api
+    DependsOn: statusFunctionLog
+
+  checkInFunctionLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/check-in
+      RetentionInDays: 7
+
+  checkInFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: check-in
+      Handler: build/main.checkInHandler
+      Description: Check-in
+      Policies:
+        - Version: 2012-10-17
+          Statement:
+            - Sid: Search
+              Effect: Allow
+              Action:
+                - geo:SearchPlaceIndexForPosition
+                - geo:SearchPlaceIndexForText
+              Resource: !Sub arn:aws:geo:${AWS::Region}:${AWS::AccountId}:place-index/explore.place
+      Events:
+        StatusEvent:
+          Type: Api
+          Properties:
+            Path: /ifttt/v1/actions/check_in
+            Method: POST
+            RestApiId: !Ref api
+    DependsOn: checkInFunctionLog
+
+  catchAllFunctionLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/catch-all
+      RetentionInDays: 7
+
+  catchAllFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: catch-all
+      Handler: build/main.catchAllHandler
+      Description: Error
+      Events:
+        CatchAllEvent:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+            RestApiId: !Ref api
+    DependsOn: catchAllFunctionLog
+
+Outputs:
+  WebEndpoint:
+    Description: API Gateway endpoint URL for dev stage
+    Value: !Sub "https://${api}.execute-api.${AWS::Region}.amazonaws.com/dev/"
+  NameServers:
+    Description: DNS Name servers for hosted zone
+    Value: !Join [", ", !GetAtt dns.NameServers]
